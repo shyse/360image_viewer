@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>全天球画像ビューアー</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/2.8.1/gl-matrix-min.js"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            height: 100%;
+        }
+        canvas {
+            display: block;
+        }
+        #upload-form {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            background: rgba(255, 255, 255, 0.8);
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="upload-form">
+        <label for="file-input">全天球画像を選択:</label>
+        <input type="file" id="file-input" accept="image/*">
+    </div>
+    <canvas id="viewer"></canvas>
+
+    <script>
+        // Canvasエレメントを取得しWebGLコンテキストを初期化
+        const canvas = document.getElementById('viewer'); // 表示用のキャンバス要素
+        const gl = canvas.getContext('webgl'); // WebGLコンテキスト
+        const fileInput = document.getElementById('file-input'); // ファイル入力エレメント
+
+        // WebGLがサポートされていない場合のエラーチェック
+        if (!gl) {
+            alert('WebGLがサポートされていません');
+            throw new Error('WebGL not supported');
+        }
+
+        // 画像処理に必要な変数
+        let texture, program, sphereBuffer; // 画像のテクスチャ、シェーダープログラム、球体バッファ
+        let yaw = 0, pitch = 0; // 視点の回転角度 (yaw: 水平方向, pitch: 垂直方向)
+        let zoom = 1.0; // ズームの初期値
+        const zoomMin = 0.8; // 最小ズーム倍率
+        const zoomMax = 2.5; // 最大ズーム倍率
+        let lastX, lastY; // 最後にマウスがクリックされた位置 (drag用)
+        let isDragging = false; // ドラッグ状態を追跡するフラグ
+
+        // キャンバスのサイズをウィンドウのサイズに合わせてリサイズする関数
+        function resizeCanvas() {
+            canvas.width = window.innerWidth; // キャンバスの幅をウィンドウの幅に設定
+            canvas.height = window.innerHeight; // キャンバスの高さをウィンドウの高さに設定
+            gl.viewport(0, 0, canvas.width, canvas.height); // WebGLのビューポートを設定
+        }
+
+        // 球体のジオメトリを初期化する関数
+        function initSphere() {
+            const latBands = 30; // 緯度方向の分割数
+            const lonBands = 30; // 経度方向の分割数
+            const radius = 500; // 球体の半径
+
+            const vertices = []; // 頂点座標を格納する配列
+            const indices = []; // 頂点インデックスを格納する配列
+            const texCoords = []; // テクスチャ座標を格納する配列
+
+            // 球体の頂点とテクスチャ座標を計算
+            for (let lat = 0; lat <= latBands; lat++) {
+                const theta = (lat * Math.PI) / latBands; // 緯度角度
+                const sinTheta = Math.sin(theta);
+                const cosTheta = Math.cos(theta);
+
+                for (let lon = 0; lon <= lonBands; lon++) {
+                    const phi = (lon * 2 * Math.PI) / lonBands; // 経度角度
+                    const sinPhi = Math.sin(phi);
+                    const cosPhi = Math.cos(phi);
+
+                    const x = cosPhi * sinTheta; // x座標
+                    const y = cosTheta; // y座標
+                    const z = sinPhi * sinTheta; // z座標
+                    const u = 1 - lon / lonBands; // テクスチャ座標 u
+                    const v = lat / latBands; // テクスチャ座標 v (上下反転しないように修正)
+
+                    vertices.push(x * radius, y * radius, z * radius); // 頂点座標を格納
+                    texCoords.push(u, v); // テクスチャ座標を格納
+                }
+            }
+
+            // 球体のインデックスを計算して、頂点インデックスの配列を構築
+            for (let lat = 0; lat < latBands; lat++) {
+                for (let lon = 0; lon < lonBands; lon++) {
+                    const first = lat * (lonBands + 1) + lon; // 最初の頂点
+                    const second = first + lonBands + 1; // 2番目の頂点
+
+                    indices.push(first, second, first + 1); // 三角形のインデックスを追加
+                    indices.push(second, second + 1, first + 1); // 三角形のインデックスを追加
+                }
+            }
+
+            // バッファを作成してデータをWebGLに転送
+            const vertexBuffer = gl.createBuffer(); // 頂点バッファを作成
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer); // バッファをバインド
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW); // 頂点データを転送
+
+            const texCoordBuffer = gl.createBuffer(); // テクスチャ座標バッファを作成
+            gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer); // バッファをバインド
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texCoords), gl.STATIC_DRAW); // テクスチャ座標データを転送
+
+            // 球体バッファオブジェクトを作成して保持
+            sphereBuffer = {
+                vertex: vertexBuffer,
+                texCoord: texCoordBuffer,
+                vertexCount: indices.length, // 頂点数
+                index: gl.createBuffer(), // インデックスバッファ
+            };
+
+            // インデックスデータを転送
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, sphereBuffer.index);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+        }
+
+        // シェーダーを初期化する関数
+        function initShaders() {
+            const vertexShaderSource = `
+                attribute vec3 aPosition;
+                attribute vec2 aTexCoord;
+                varying vec2 vTexCoord;
+                uniform mat4 uViewMatrix;
+                uniform mat4 uProjectionMatrix;
+
+                void main() {
+                    vTexCoord = aTexCoord;
+                    gl_Position = uProjectionMatrix * uViewMatrix * vec4(aPosition, 1.0);
+                }
+            `; // 頂点シェーダーのソースコード
+
+            const fragmentShaderSource = `
+                precision mediump float;
+                varying vec2 vTexCoord;
+                uniform sampler2D uTexture;
+
+                void main() {
+                    gl_FragColor = texture2D(uTexture, vTexCoord);
+                }
+            `; // フラグメントシェーダーのソースコード
+
+            const vertexShader = createShader(gl.VERTEX_SHADER, vertexShaderSource); // 頂点シェーダーを作成
+            const fragmentShader = createShader(gl.FRAGMENT_SHADER, fragmentShaderSource); // フラグメントシェーダーを作成
+
+            program = createProgram(vertexShader, fragmentShader); // シェーダープログラムを作成
+            gl.useProgram(program); // プログラムを使用
+        }
+
+        // シェーダーを作成する関数
+        function createShader(type, source) {
+            const shader = gl.createShader(type); // シェーダーを作成
+            gl.shaderSource(shader, source); // ソースコードをシェーダーにセット
+            gl.compileShader(shader); // シェーダーをコンパイル
+
+            // コンパイルエラーのチェック
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error(gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader); // シェーダーを削除
+                throw new Error('Shader compilation failed');
+            }
+
+            return shader; // 作成したシェーダーを返す
+        }
+
+        // プログラムを作成する関数
+        function createProgram(vertexShader, fragmentShader) {
+            const program = gl.createProgram(); // プログラムを作成
+            gl.attachShader(program, vertexShader); // 頂点シェーダーをプログラムに追加
+            gl.attachShader(program, fragmentShader); // フラグメントシェーダーをプログラムに追加
+            gl.linkProgram(program); // プログラムをリンク
+
+            // リンクエラーのチェック
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error(gl.getProgramInfoLog(program));
+                gl.deleteProgram(program); // プログラムを削除
+                throw new Error('Program linking failed');
+            }
+
+            return program; // 作成したプログラムを返す
+        }
+
+        // 画像のテクスチャを読み込む関数
+        function loadTexture(image) {
+            texture = gl.createTexture(); // テクスチャを作成
+            gl.bindTexture(gl.TEXTURE_2D, texture); // テクスチャをバインド
+
+            // テクスチャパラメータを設定
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+            // テクスチャに画像を設定
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+            console.log('Texture loaded successfully');
+        }
+
+        // 画像を描画する関数
+        function render() {
+            gl.clearColor(0, 0, 0, 1); // 背景色を黒に設定
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); // バッファをクリア
+            gl.enable(gl.DEPTH_TEST); // 深度テストを有効にする
+
+            const viewMatrix = mat4.create(); // ビュー行列を作成
+            const projectionMatrix = mat4.create(); // 投影行列を作成
+
+            mat4.perspective(projectionMatrix, (Math.PI / 2) / zoom, canvas.width / canvas.height, 0.1, 1000.0); // 投影行列を設定 (ズーム対応)
+            mat4.rotate(viewMatrix, viewMatrix, pitch, [1, 0, 0]); // ピッチ回転を適用
+            mat4.rotate(viewMatrix, viewMatrix, yaw, [0, 1, 0]); // ヨー回転を適用
+
+            // ユーザー定義の行列をシェーダーに設定
+            const uViewMatrix = gl.getUniformLocation(program, 'uViewMatrix');
+            const uProjectionMatrix = gl.getUniformLocation(program, 'uProjectionMatrix');
+            gl.uniformMatrix4fv(uViewMatrix, false, viewMatrix);
+            gl.uniformMatrix4fv(uProjectionMatrix, false, projectionMatrix);
+
+            // 頂点属性を設定
+            const aPosition = gl.getAttribLocation(program, 'aPosition');
+            const aTexCoord = gl.getAttribLocation(program, 'aTexCoord');
+            gl.bindBuffer(gl.ARRAY_BUFFER, sphereBuffer.vertex);
+            gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(aPosition);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, sphereBuffer.texCoord);
+            gl.vertexAttribPointer(aTexCoord, 2, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(aTexCoord);
+
+            // インデックスバッファをバインド
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, sphereBuffer.index);
+
+            // テクスチャをシェーダーに設定
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            const uTexture = gl.getUniformLocation(program, 'uTexture');
+            gl.uniform1i(uTexture, 0);
+
+            // 球体を描画
+            gl.drawElements(gl.TRIANGLES, sphereBuffer.vertexCount, gl.UNSIGNED_SHORT, 0);
+
+            requestAnimationFrame(render); // 次のフレームを描画
+        }
+
+        // ファイル選択時のイベントリスナー
+        fileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0]; // 選択されたファイル
+            if (file) {
+                const reader = new FileReader(); // FileReaderを作成
+                reader.onload = (e) => {
+                    const image = new Image(); // 新しい画像オブジェクトを作成
+                    image.onload = () => {
+                        console.log('Image loaded successfully'); // 画像のロード成功
+                        loadTexture(image); // テクスチャをロード
+                        render(); // 描画開始
+                    };
+                    image.src = e.target.result; // 画像ソースを設定
+                };
+                reader.readAsDataURL(file); // ファイルを読み込み
+            }
+        });
+
+        // マウスダウンイベントリスナー (ドラッグ開始)
+        canvas.addEventListener('mousedown', (event) => {
+            isDragging = true; // ドラッグフラグを立てる
+            lastX = event.clientX; // 最初のX座標
+            lastY = event.clientY; // 最初のY座標
+        });
+
+        // マウスムーブイベントリスナー (ドラッグ中に回転)
+        canvas.addEventListener('mousemove', (event) => {
+            if (isDragging) {
+                // ズームレベルを考慮したドラッグの差分を算出
+                const deltaX = (event.clientX - lastX) / zoom; // ズームを考慮したX軸の移動量
+                const deltaY = (event.clientY - lastY) / zoom; // ズームを考慮したY軸の移動量
+                lastX = event.clientX; // 新しいX座標
+                lastY = event.clientY; // 新しいY座標
+
+                yaw -= deltaX * 0.01; // X軸回転
+                pitch -= deltaY * 0.01; // Y軸回転
+                pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch)); // ピッチの範囲制限
+            }
+        });
+
+        // マウスアップイベントリスナー (ドラッグ終了)
+        canvas.addEventListener('mouseup', () => {
+            isDragging = false; // ドラッグフラグを解除
+        });
+
+        // マウスアウトイベントリスナー (キャンバス外にマウスが出た場合)
+        canvas.addEventListener('mouseleave', () => {
+            isDragging = false; // ドラッグフラグを解除
+        });
+
+        // ホイールイベントリスナー (ズーム調整)
+        canvas.addEventListener('wheel', (event) => {
+            zoom += event.deltaY * -0.01; // ホイール方向に応じたズーム調整
+            zoom = Math.max(zoomMin, Math.min(zoomMax, zoom)); // ズーム範囲を制限
+        });
+
+        // ウィンドウサイズ変更時にキャンバスをリサイズ
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas(); // 初期化時にキャンバスをリサイズ
+
+        initShaders(); // シェーダーを初期化
+        initSphere(); // 球体のジオメトリを初期化
+    </script>
+</body>
+</html>
