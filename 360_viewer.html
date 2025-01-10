@@ -24,6 +24,19 @@
             padding: 10px;
             border-radius: 5px;
         }
+        /* ドラッグドロップエリアを全範囲に拡大 */
+        body {
+            position: relative;
+        }
+        #drop-area {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 5;
+            pointer-events: none; /* ドラッグドロップエリアを無効化 */
+        }
     </style>
 </head>
 <body>
@@ -31,6 +44,7 @@
         <label for="file-input">全天球画像を選択:</label>
         <input type="file" id="file-input" accept="image/*">
     </div>
+    <div id="drop-area"></div> <!-- ドラッグドロップエリア -->
     <canvas id="viewer"></canvas>
 
     <script>
@@ -38,6 +52,7 @@
         const canvas = document.getElementById('viewer'); // 表示用のキャンバス要素
         const gl = canvas.getContext('webgl'); // WebGLコンテキスト
         const fileInput = document.getElementById('file-input'); // ファイル入力エレメント
+        const dropArea = document.getElementById('drop-area'); // ドラッグドロップエリア
 
         // WebGLがサポートされていない場合のエラーチェック
         if (!gl) {
@@ -270,6 +285,34 @@
             }
         });
 
+        // ドラッグオーバーイベントリスナー
+        dropArea.addEventListener('dragover', (event) => {
+            event.preventDefault(); // デフォルトの動作を無効化
+            event.stopPropagation(); // イベントのバブリングを停止
+            dropArea.style.pointerEvents = 'auto'; // ドラッグ中にpointer-eventsを有効化
+        });
+
+        // ドロップイベントリスナー
+        dropArea.addEventListener('drop', (event) => {
+            event.preventDefault(); // デフォルトの動作を無効化
+            event.stopPropagation(); // イベントのバブリングを停止
+            dropArea.style.pointerEvents = 'none'; // ドロップ後にpointer-eventsを無効化
+            const file = event.dataTransfer.files[0]; // ドロップされたファイル
+            if (file) {
+                const reader = new FileReader(); // FileReaderを作成
+                reader.onload = (e) => {
+                    const image = new Image(); // 新しい画像オブジェクトを作成
+                    image.onload = () => {
+                        console.log('Image loaded successfully'); // 画像のロード成功
+                        loadTexture(image); // テクスチャをロード
+                        render(); // 描画開始
+                    };
+                    image.src = e.target.result; // 画像ソースを設定
+                };
+                reader.readAsDataURL(file); // ファイルを読み込み
+            }
+        });
+
         // マウスダウンイベントリスナー (ドラッグ開始)
         canvas.addEventListener('mousedown', (event) => {
             isDragging = true; // ドラッグフラグを立てる
@@ -280,14 +323,14 @@
         // マウスムーブイベントリスナー (ドラッグ中に回転)
         canvas.addEventListener('mousemove', (event) => {
             if (isDragging) {
-                // ズームレベルを考慮したドラッグの差分を算出
-                const deltaX = (event.clientX - lastX) / zoom; // ズームを考慮したX軸の移動量
-                const deltaY = (event.clientY - lastY) / zoom; // ズームを考慮したY軸の移動量
+                // マウスの移動量をそのまま回転量に反映
+                const deltaX = event.clientX - lastX; // X軸の移動量
+                const deltaY = event.clientY - lastY; // Y軸の移動量
                 lastX = event.clientX; // 新しいX座標
                 lastY = event.clientY; // 新しいY座標
 
-                yaw -= deltaX * 0.01; // X軸回転
-                pitch -= deltaY * 0.01; // Y軸回転
+                yaw -= deltaX * 0.005; // X軸回転
+                pitch -= deltaY * 0.005; // Y軸回転
                 pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch)); // ピッチの範囲制限
             }
         });
