@@ -92,8 +92,8 @@
                     const x = cosPhi * sinTheta; // x座標
                     const y = cosTheta; // y座標
                     const z = sinPhi * sinTheta; // z座標
-                    const u = 1 - lon / lonBands; // テクスチャ座標 u
-                    const v = lat / latBands; // テクスチャ座標 v (上下反転しないように修正)
+                    const u = 1 - lon / lonBands; // テクスチャ座標 u (左右反転)
+                    const v = lat / latBands; // テクスチャ座標 v
 
                     vertices.push(x * radius, y * radius, z * radius); // 頂点座標を格納
                     texCoords.push(u, v); // テクスチャ座標を格納
@@ -154,7 +154,8 @@
                 uniform sampler2D uTexture;
 
                 void main() {
-                    gl_FragColor = texture2D(uTexture, vTexCoord);
+                    vec2 flippedCoord = vec2(1.0 - vTexCoord.x, vTexCoord.y);
+                    gl_FragColor = texture2D(uTexture, flippedCoord);
                 }
             `; // フラグメントシェーダーのソースコード
 
